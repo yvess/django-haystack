@@ -355,7 +355,9 @@ class MultiValueField(SearchField):
     def convert(self, value):
         if value is None:
             return None
-
+        if hasattr(value, 'all'):
+            value = value.all()
+        
         return list(value)
 
 
