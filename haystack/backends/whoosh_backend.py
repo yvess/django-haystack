@@ -1,4 +1,3 @@
-import logging
 import os
 import re
 import shutil
@@ -15,6 +14,8 @@ from haystack.exceptions import MissingDependency, SearchBackendError
 from haystack.inputs import PythonData, Clean, Exact
 from haystack.models import SearchResult
 from haystack.utils import get_identifier
+from haystack.utils import log as logging
+
 try:
     import json
 except ImportError:
@@ -22,11 +23,6 @@ except ImportError:
         import simplejson as json
     except ImportError:
         from django.utils import simplejson as json
-try:
-    from django.db.models.sql.query import get_proxied_model
-except ImportError:
-    # Likely on Django 1.0
-    get_proxied_model = None
 
 try:
     import whoosh
@@ -187,7 +183,15 @@ class WhooshSearchBackend(BaseSearchBackend):
                 if not self.silently_fail:
                     raise
 
-                self.log.error("Failed to add documents to Whoosh: %s", e)
+                # We'll log the object identifier but won't include the actual object
+                # to avoid the possibility of that generating encoding errors while
+                # processing the log message:
+                self.log.error(u"%s while preparing object for update" % e.__name__, exc_info=True, extra={
+                    "data": {
+                        "index": index,
+                        "object": get_identifier(obj)
+                    }
+                })
 
         if len(iterable) > 0:
             # For now, commit no matter what, as we run into locking issues otherwise.
@@ -257,7 +261,7 @@ class WhooshSearchBackend(BaseSearchBackend):
     def search(self, query_string, sort_by=None, start_offset=0, end_offset=None,
                fields='', highlight=False, facets=None, date_facets=None, query_facets=None,
                narrow_queries=None, spelling_query=None, within=None,
-               dwithin=None, distance_point=None,
+               dwithin=None, distance_point=None, models=None,
                limit_to_registered_models=None, result_class=None, **kwargs):
         if not self.setup_complete:
             self.setup()
@@ -324,16 +328,20 @@ class WhooshSearchBackend(BaseSearchBackend):
         if limit_to_registered_models is None:
             limit_to_registered_models = getattr(settings, 'HAYSTACK_LIMIT_TO_REGISTERED_MODELS', True)
 
-        if limit_to_registered_models:
+        if models and len(models):
+            model_choices = sorted(['%s.%s' % (model._meta.app_label, model._meta.module_name) for model in models])
+        elif limit_to_registered_models:
             # Using narrow queries, limit the results to only models handled
             # with the current routers.
+            model_choices = self.build_models_list()
+        else:
+            model_choices = []
+
+        if len(model_choices) > 0:
             if narrow_queries is None:
                 narrow_queries = set()
 
-            registered_models = self.build_models_list()
-
-            if len(registered_models) > 0:
-                narrow_queries.add(' OR '.join(['%s:%s' % (DJANGO_CT, rm) for rm in registered_models]))
+            narrow_queries.add(' OR '.join(['%s:%s' % (DJANGO_CT, rm) for rm in model_choices]))
 
         narrow_searcher = None
 
@@ -343,6 +351,12 @@ class WhooshSearchBackend(BaseSearchBackend):
 
             for nq in narrow_queries:
                 recent_narrowed_results = narrow_searcher.search(self.parser.parse(force_unicode(nq)))
+
+                if len(recent_narrowed_results) <= 0:
+                    return {
+                        'results': [],
+                        'hits': 0,
+                    }
 
                 if narrowed_results:
                     narrowed_results.filter(recent_narrowed_results)
@@ -370,7 +384,7 @@ class WhooshSearchBackend(BaseSearchBackend):
             raw_results = searcher.search(parsed_query, limit=end_offset, sortedby=sort_by, reverse=reverse)
 
             # Handle the case where the results have been narrowed.
-            if narrowed_results:
+            if narrowed_results is not None:
                 raw_results.filter(narrowed_results)
 
             # Determine the page.
@@ -425,16 +439,14 @@ class WhooshSearchBackend(BaseSearchBackend):
             }
 
     def more_like_this(self, model_instance, additional_query_string=None,
-                       start_offset=0, end_offset=None,
+                       start_offset=0, end_offset=None, models=None,
                        limit_to_registered_models=None, result_class=None, **kwargs):
         if not self.setup_complete:
             self.setup()
 
-        # Handle deferred models.
-        if get_proxied_model and hasattr(model_instance, '_deferred') and model_instance._deferred:
-            model_klass = get_proxied_model(model_instance._meta)
-        else:
-            model_klass = type(model_instance)
+        # Deferred models will have a different class ("RealClass_Deferred_fieldname")
+        # which won't be in our registry:
+        model_klass = model_instance._meta.concrete_model
 
         field_name = self.content_field_name
         narrow_queries = set()
@@ -444,16 +456,20 @@ class WhooshSearchBackend(BaseSearchBackend):
         if limit_to_registered_models is None:
             limit_to_registered_models = getattr(settings, 'HAYSTACK_LIMIT_TO_REGISTERED_MODELS', True)
 
-        if limit_to_registered_models:
-            # Using narrow queries, limit the results to only models registered
-            # with the current site.
+        if models and len(models):
+            model_choices = sorted(['%s.%s' % (model._meta.app_label, model._meta.module_name) for model in models])
+        elif limit_to_registered_models:
+            # Using narrow queries, limit the results to only models handled
+            # with the current routers.
+            model_choices = self.build_models_list()
+        else:
+            model_choices = []
+
+        if len(model_choices) > 0:
             if narrow_queries is None:
                 narrow_queries = set()
 
-            registered_models = self.build_models_list()
-
-            if len(registered_models) > 0:
-                narrow_queries.add(' OR '.join(['%s:%s' % (DJANGO_CT, rm) for rm in registered_models]))
+            narrow_queries.add(' OR '.join(['%s:%s' % (DJANGO_CT, rm) for rm in model_choices]))
 
         if additional_query_string and additional_query_string != '*':
             narrow_queries.add(additional_query_string)
@@ -466,6 +482,12 @@ class WhooshSearchBackend(BaseSearchBackend):
 
             for nq in narrow_queries:
                 recent_narrowed_results = narrow_searcher.search(self.parser.parse(force_unicode(nq)))
+
+                if len(recent_narrowed_results) <= 0:
+                    return {
+                        'results': [],
+                        'hits': 0,
+                    }
 
                 if narrowed_results:
                     narrowed_results.filter(recent_narrowed_results)
@@ -507,7 +529,7 @@ class WhooshSearchBackend(BaseSearchBackend):
                 raw_results = results[0].more_like_this(field_name, top=end_offset)
 
             # Handle the case where the results have been narrowed.
-            if narrowed_results and hasattr(raw_results, 'filter'):
+            if narrowed_results is not None and hasattr(raw_results, 'filter'):
                 raw_results.filter(narrowed_results)
 
         try:
@@ -767,24 +789,27 @@ class WhooshSearchQuery(BaseSearchQuery):
             query_frag = prepared_value
         else:
             if filter_type in ['contains', 'startswith']:
-                # Iterate over terms & incorportate the converted form of each into the query.
-                terms = []
-
-                if isinstance(prepared_value, basestring):
-                    possible_values = prepared_value.split(' ')
+                if value.input_type_name == 'exact':
+                    query_frag = prepared_value
                 else:
-                    if is_datetime is True:
-                        prepared_value = self._convert_datetime(prepared_value)
+                    # Iterate over terms & incorportate the converted form of each into the query.
+                    terms = []
 
-                    possible_values = [prepared_value]
+                    if isinstance(prepared_value, basestring):
+                        possible_values = prepared_value.split(' ')
+                    else:
+                        if is_datetime is True:
+                            prepared_value = self._convert_datetime(prepared_value)
 
-                for possible_value in possible_values:
-                    terms.append(filter_types[filter_type] % self.backend._from_python(possible_value))
+                        possible_values = [prepared_value]
 
-                if len(terms) == 1:
-                    query_frag = terms[0]
-                else:
-                    query_frag = u"(%s)" % " AND ".join(terms)
+                    for possible_value in possible_values:
+                        terms.append(filter_types[filter_type] % self.backend._from_python(possible_value))
+
+                    if len(terms) == 1:
+                        query_frag = terms[0]
+                    else:
+                        query_frag = u"(%s)" % " AND ".join(terms)
             elif filter_type == 'in':
                 in_options = []
 
@@ -798,8 +823,11 @@ class WhooshSearchQuery(BaseSearchQuery):
 
                     if is_datetime is True:
                         pv = self._convert_datetime(pv)
-
-                    in_options.append('"%s"' % pv)
+                    
+                    if isinstance(pv, basestring) and not is_datetime:
+                        in_options.append('"%s"' % pv)
+                    else:
+                        in_options.append('%s' % pv)
 
                 query_frag = "(%s)" % " OR ".join(in_options)
             elif filter_type == 'range':
@@ -824,6 +852,9 @@ class WhooshSearchQuery(BaseSearchQuery):
                     prepared_value = self._convert_datetime(prepared_value)
 
                 query_frag = filter_types[filter_type] % prepared_value
+
+        if len(query_frag) and not query_frag.startswith('(') and not query_frag.endswith(')'):
+            query_frag = "(%s)" % query_frag
 
         return u"%s%s" % (index_fieldname, query_frag)
 

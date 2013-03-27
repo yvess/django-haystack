@@ -1,3 +1,5 @@
+.. _ref-other_apps:
+
 =============================
 Haystack-Related Applications
 =============================
@@ -13,17 +15,18 @@ queued_search
 
 http://github.com/toastdriven/queued_search (2.X compatible)
 
-Provides a queue-based setup as an alternative to ``RealTimeSearchIndex`` or
+Provides a queue-based setup as an alternative to ``RealtimeSignalProcessor`` or
 constantly running the ``update_index`` command. Useful for high-load, short
 update time situations.
 
 celery-haystack
 ---------------
 
-https://github.com/ennio/celery-haystack (2.X compatible)
+https://github.com/jezdez/celery-haystack (1.X and 2.X compatible)
 
 Also provides a queue-based setup, this time centered around Celery. Useful
-for keeping the index fresh.
+for keeping the index fresh per model instance or with the included task
+to call the ``update_index`` management command instead.
 
 django-celery-haystack
 ----------------------
@@ -42,6 +45,14 @@ Adds personalization to search. Retains a history of queries run by the various
 users on the site (including anonymous users). This can be used to present the
 user with their search history and provide most popular/most recent queries
 on the site.
+
+saved-search
+------------
+
+https://github.com/DirectEmployers/saved-search
+
+An alternate take on persisting user searches, this has a stronger focus
+on locale-based searches as well as further integration.
 
 haystack-static-pages
 ---------------------

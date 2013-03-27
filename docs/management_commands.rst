@@ -37,6 +37,13 @@ wish to delete the entire index.
 ``update_index``
 ================
 
+.. note::
+
+    If you use the ``--start/--end`` flags on this command, you'll need to
+    install dateutil_ to handle the datetime parsing.
+
+    .. _dateutil: http://pypi.python.org/pypi/python-dateutil/1.5
+
 The ``update_index`` command will freshen all of the content in your index. It
 iterates through all indexed models and updates the records in the index. In
 addition to the standard management command options, it accepts the following
@@ -106,7 +113,7 @@ Examples::
     deletions unless the ``--remove`` flag is provided. You might consider
     a queue consumer if the memory requirements for ``--remove`` don't
     fit your needs. Alternatively, you can use the
-    ``RealTimeSearchIndex``, which will automatically handle deletions.
+    ``RealtimeSignalProcessor``, which will automatically handle deletions.
 
 
 ``rebuild_index``
@@ -157,7 +164,7 @@ following arguments::
         If provided, determines which connection should be used. Default is
         ``default``.
 
-.. warning:
+.. warning::
 
     This command does NOT update the ``schema.xml`` file for you. You either
     have to specify a ``filename`` flag or have to

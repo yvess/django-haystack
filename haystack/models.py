@@ -1,10 +1,11 @@
 # "Hey, Django! Look at me, I'm an app! For Serious!"
-import logging
+from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import models
 from django.utils.encoding import force_unicode
 from django.utils.text import capfirst
 from haystack.exceptions import NotHandled, SpatialError
+from haystack.utils import log as logging
 
 try:
     from geopy import distance as geopy_distance
@@ -65,18 +66,18 @@ class SearchResult(object):
     def _get_object(self):
         if self._object is None:
             if self.model is None:
-                self.log.error("Model could not be found for SearchResult '%s'." % self)
+                self.log.error("Model could not be found for SearchResult '%s'.", self)
                 return None
 
             try:
                 try:
                     self._object = self.searchindex.read_queryset().get(pk=self.pk)
                 except NotHandled:
-                    self.log.warning("Model '%s.%s' not handled by the routers." % (self.app_label, self.model_name))
+                    self.log.warning("Model '%s.%s' not handled by the routers.", self.app_label, self.model_name)
                     # Revert to old behaviour
                     self._object = self.model._default_manager.get(pk=self.pk)
             except ObjectDoesNotExist:
-                self.log.error("Object could not be found in database for SearchResult '%s'." % self)
+                self.log.error("Object could not be found in database for SearchResult '%s'.", self)
                 self._object = None
 
         return self._object
@@ -134,7 +135,7 @@ class SearchResult(object):
 
     def _get_verbose_name(self):
         if self.model is None:
-            self.log.error("Model could not be found for SearchResult '%s'." % self)
+            self.log.error("Model could not be found for SearchResult '%s'.", self)
             return u''
 
         return force_unicode(capfirst(self.model._meta.verbose_name))
@@ -143,7 +144,7 @@ class SearchResult(object):
 
     def _get_verbose_name_plural(self):
         if self.model is None:
-            self.log.error("Model could not be found for SearchResult '%s'." % self)
+            self.log.error("Model could not be found for SearchResult '%s'.", self)
             return u''
 
         return force_unicode(capfirst(self.model._meta.verbose_name_plural))
@@ -153,7 +154,7 @@ class SearchResult(object):
     def content_type(self):
         """Returns the content type for the result's model instance."""
         if self.model is None:
-            self.log.error("Model could not be found for SearchResult '%s'." % self)
+            self.log.error("Model could not be found for SearchResult '%s'.", self)
             return u''
 
         return unicode(self.model._meta)
@@ -219,13 +220,11 @@ class SearchResult(object):
         self.log = self._get_log()
 
 
-# Setup pre_save/pre_delete signals to make sure things like the signals in
-# ``RealTimeSearchIndex`` are setup in time to handle data changes.
-def load_indexes(sender, instance, *args, **kwargs):
+def reload_indexes(sender, *args, **kwargs):
     from haystack import connections
 
     for conn in connections.all():
-        conn.get_unified_index().setup_indexes()
-
-models.signals.pre_save.connect(load_indexes, dispatch_uid='setup_index_signals')
-models.signals.pre_delete.connect(load_indexes, dispatch_uid='setup_index_signals')
+        ui = conn.get_unified_index()
+        # Note: Unlike above, we're resetting the ``UnifiedIndex`` here.
+        # Thi gives us a clean slate.
+        ui.reset()

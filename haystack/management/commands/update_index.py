@@ -1,16 +1,23 @@
-import datetime
-from dateutil.parser import parse as dateutil_parse
-import os
-import warnings
+from datetime import timedelta
 from optparse import make_option
+import logging
+import os
+
+from django import db
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.management.base import LabelCommand
 from django.db import reset_queries
-from django.utils.encoding import smart_str
+from django.utils.encoding import smart_str, force_unicode
+
 from haystack import connections as haystack_connections
-from haystack.constants import DEFAULT_ALIAS
 from haystack.query import SearchQuerySet
+
+try:
+    from django.utils.timezone import now
+except ImportError:
+    from datetime import datetime
+    now = datetime.now
 
 
 DEFAULT_BATCH_SIZE = None
@@ -29,7 +36,11 @@ def worker(bits):
         # out connections (via ``... = {}``) destroys in-memory DBs.
         if not 'sqlite3' in info['ENGINE']:
             try:
-                del(connections._connections[alias])
+                db.close_connection()
+                if isinstance(connections._connections, dict):
+                    del(connections._connections[alias])
+                else:
+                    delattr(connections._connections, alias)
             except KeyError:
                 pass
 
@@ -45,44 +56,10 @@ def worker(bits):
     backend = haystack_connections[using].get_backend()
 
     if func == 'do_update':
-        qs = build_queryset(index, model, start_date=start_date, end_date=end_date, verbosity=verbosity)
+        qs = index.build_queryset(start_date=start_date, end_date=end_date)
         do_update(backend, index, qs, start, end, total, verbosity=verbosity)
     elif bits[0] == 'do_remove':
         do_remove(backend, index, model, pks_seen, start, upper_bound, verbosity=verbosity)
-
-
-def build_queryset(index, model, start_date=None, end_date=None, verbosity=1):
-    extra_lookup_kwargs = {}
-    updated_field = index.get_updated_field()
-
-    if start_date:
-        if updated_field:
-            extra_lookup_kwargs['%s__gte' % updated_field] = start_date
-        else:
-            if verbosity >= 2:
-                print "No updated date field found for '%s' - not restricting by age." % model.__name__
-
-    if end_date:
-        if updated_field:
-            extra_lookup_kwargs['%s__lte' % updated_field] = end_date
-        else:
-            if verbosity >= 2:
-                print "No updated date field found for '%s' - not restricting by age." % model.__name__
-
-    index_qs = None
-
-    if hasattr(index, 'get_queryset'):
-        warnings.warn("'SearchIndex.get_queryset' was deprecated in Haystack v2. Please rename the method 'index_queryset'.")
-        index_qs = index.get_queryset()
-    else:
-        index_qs = index.index_queryset()
-
-    if not hasattr(index_qs, 'filter'):
-        raise ImproperlyConfigured("The '%r' class must return a 'QuerySet' in the 'index_queryset' method." % index)
-
-    # `.select_related()` seems like a good idea here but can fail on
-    # nullable `ForeignKey` as well as what seems like other cases.
-    return index_qs.filter(**extra_lookup_kwargs).order_by(model._meta.pk.name)
 
 
 def do_update(backend, index, qs, start, end, total, verbosity=1):
@@ -92,10 +69,10 @@ def do_update(backend, index, qs, start, end, total, verbosity=1):
     current_qs = small_cache_qs[start:end]
 
     if verbosity >= 2:
-        if os.getpid() == os.getppid():
-            print "  indexed %s - %d of %d." % (start+1, end, total)
+        if hasattr(os, 'getppid') and os.getpid() == os.getppid():
+            print "  indexed %s - %d of %d." % (start + 1, end, total)
         else:
-            print "  indexed %s - %d of %d (by %s)." % (start+1, end, total, os.getpid())
+            print "  indexed %s - %d of %d (by %s)." % (start + 1, end, total, os.getpid())
 
     # FIXME: Get the right backend.
     backend.update(index, current_qs)
@@ -143,8 +120,10 @@ class Command(LabelCommand):
         make_option('-r', '--remove', action='store_true', dest='remove',
             default=False, help='Remove objects from the index that are no longer present in the database.'
         ),
-        make_option("-u", "--using", action="store", type="string", dest="using", default=DEFAULT_ALIAS,
-            help='If provided, chooses a connection to work with.'
+        make_option("-u", "--using", action="append", dest="using",
+            default=[],
+            help='Update only the named backend (can be used multiple times). '
+                 'By default all backends will be updated.'
         ),
         make_option('-k', '--workers', action='store', dest='workers',
             default=0, type='int',
@@ -159,24 +138,30 @@ class Command(LabelCommand):
         self.start_date = None
         self.end_date = None
         self.remove = options.get('remove', False)
-        self.using = options.get('using')
         self.workers = int(options.get('workers', 0))
-        self.backend = haystack_connections[self.using].get_backend()
+
+        self.backends = options.get('using')
+        if not self.backends:
+            self.backends = haystack_connections.connections_info.keys()
 
         age = options.get('age', DEFAULT_AGE)
         start_date = options.get('start_date')
         end_date = options.get('end_date')
 
         if age is not None:
-            self.start_date = datetime.datetime.now() - datetime.timedelta(hours=int(age))
+            self.start_date = now() - timedelta(hours=int(age))
 
         if start_date is not None:
+            from dateutil.parser import parse as dateutil_parse
+
             try:
                 self.start_date = dateutil_parse(start_date)
             except ValueError:
                 pass
 
         if end_date is not None:
+            from dateutil.parser import parse as dateutil_parse
+
             try:
                 self.end_date = dateutil_parse(end_date)
             except ValueError:
@@ -220,9 +205,18 @@ class Command(LabelCommand):
             return [get_model(app_label, model_name)]
 
     def handle_label(self, label, **options):
+        for using in self.backends:
+            try:
+                self.update_backend(label, using)
+            except:
+                logging.exception("Error updating %s using %s ", label, using)
+                raise
+
+    def update_backend(self, label, using):
         from haystack.exceptions import NotHandled
 
-        unified_index = haystack_connections[self.using].get_unified_index()
+        backend = haystack_connections[using].get_backend()
+        unified_index = haystack_connections[using].get_unified_index()
 
         if self.workers > 0:
             import multiprocessing
@@ -235,14 +229,22 @@ class Command(LabelCommand):
                     print "Skipping '%s' - no index." % model
                 continue
 
-            qs = build_queryset(index, model, start_date=self.start_date, end_date=self.end_date, verbosity=self.verbosity)
+            if self.workers > 0:
+                # workers resetting connections leads to references to models / connections getting
+                # stale and having their connection disconnected from under them. Resetting before
+                # the loop continues and it accesses the ORM makes it better.
+                db.close_connection()
+
+            qs = index.build_queryset(using=using, start_date=self.start_date,
+                                      end_date=self.end_date)
+
             total = qs.count()
 
             if self.verbosity >= 1:
-                print "Indexing %d %s." % (total, smart_str(model._meta.verbose_name_plural))
+                print "Indexing %d %s." % (total, force_unicode(model._meta.verbose_name_plural))
 
             pks_seen = set([smart_str(pk) for pk in qs.values_list('pk', flat=True)])
-            batch_size = self.batchsize or self.backend.batch_size
+            batch_size = self.batchsize or backend.batch_size
 
             if self.workers > 0:
                 ghetto_queue = []
@@ -251,13 +253,14 @@ class Command(LabelCommand):
                 end = min(start + batch_size, total)
 
                 if self.workers == 0:
-                    do_update(self.backend, index, qs, start, end, total, self.verbosity)
+                    do_update(backend, index, qs, start, end, total, self.verbosity)
                 else:
-                    ghetto_queue.append(('do_update', model, start, end, total, self.using, self.start_date, self.end_date, self.verbosity))
+                    ghetto_queue.append(('do_update', model, start, end, total, using, self.start_date, self.end_date, self.verbosity))
 
             if self.workers > 0:
                 pool = multiprocessing.Pool(self.workers)
                 pool.map(worker, ghetto_queue)
+                pool.terminate()
 
             if self.remove:
                 if self.start_date or self.end_date or total <= 0:
@@ -274,10 +277,11 @@ class Command(LabelCommand):
                     upper_bound = start + batch_size
 
                     if self.workers == 0:
-                        do_remove(self.backend, index, model, pks_seen, start, upper_bound)
+                        do_remove(backend, index, model, pks_seen, start, upper_bound)
                     else:
-                        ghetto_queue.append(('do_remove', model, pks_seen, start, upper_bound, self.using, self.verbosity))
+                        ghetto_queue.append(('do_remove', model, pks_seen, start, upper_bound, using, self.verbosity))
 
                 if self.workers > 0:
                     pool = multiprocessing.Pool(self.workers)
                     pool.map(worker, ghetto_queue)
+                    pool.terminate()

@@ -108,6 +108,20 @@ Example::
     }
 
 
+Elasticsearch
+~~~~~~~~~~~~~
+
+Example::
+
+    HAYSTACK_CONNECTIONS = {
+        'default': {
+            'ENGINE': 'haystack.backends.elasticsearch_backend.ElasticsearchSearchEngine',
+            'URL': 'http://127.0.0.1:9200/',
+            'INDEX_NAME': 'haystack',
+        },
+    }
+
+
 Whoosh
 ~~~~~~
 
@@ -154,6 +168,13 @@ Simple
 The ``simple`` backend using very basic matching via the database itself. It's
 not recommended for production use but it will return results.
 
+.. warning::
+
+    This backend does *NOT* work like the other backends do. Data preparation
+    does nothing & advanced filtering calls do not work. You really probably
+    don't want this unless you're in an environment where you just want to
+    silence Haystack.
+
 Example::
 
     HAYSTACK_CONNECTIONS = {
@@ -178,19 +199,14 @@ You generally create a unique ``SearchIndex`` for each type of ``Model`` you
 wish to index, though you can reuse the same ``SearchIndex`` between different
 models if you take care in doing so and your field names are very standardized.
 
-To use a ``SearchIndex``, you need to register it with the ``Model`` it applies
-to and the ``SearchSite`` it ought to belong to. Registering indexes in Haystack
-is very similar to the way you register models and ``ModelAdmin`` classes with
-the `Django admin site`_.
-
-To build a ``SearchIndex``, all that's necessary is to subclass ``SearchIndex``,
-define the fields you want to store data with and register it.
+To build a ``SearchIndex``, all that's necessary is to subclass both
+``indexes.SearchIndex`` & ``indexes.Indexable``,
+define the fields you want to store data with and define a ``get_model`` method.
 
 We'll create the following ``NoteIndex`` to correspond to our ``Note``
 model. This code generally goes in a ``search_indexes.py`` file within the app
 it applies to, though that is not required. This allows
-``haystack.autodiscover()`` to automatically pick it up. The
-``NoteIndex`` should look like::
+Haystack to automatically pick it up. The ``NoteIndex`` should look like::
 
     import datetime
     from haystack import indexes
@@ -205,7 +221,7 @@ it applies to, though that is not required. This allows
         def get_model(self):
             return Note
 
-        def index_queryset(self):
+        def index_queryset(self, using=None):
             """Used when the entire index for model is updated."""
             return self.get_model().objects.filter(pub_date__lte=datetime.datetime.now())
 
@@ -344,7 +360,7 @@ models were processed and placed in the index.
     things to update).
 
     Alternatively, if you have low traffic and/or your search engine can handle
-    it, the ``RealTimeSearchIndex`` automatically handles updates/deletes
+    it, the ``RealtimeSignalProcessor`` automatically handles updates/deletes
     for you.
 
 
